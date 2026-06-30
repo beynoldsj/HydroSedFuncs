@@ -11,11 +11,15 @@ class BankfullGeometry:
     Holder for the four variables involved in bankfull geometry to pass around. The inputs
     can be single values or numpy arrays.
     '''
-    def __init__(self,Q,B,H,S):
+    def __init__(self,Q,B,H,S,g=9.81):
         self.Q = Q 
         self.B = B 
         self.H = H 
         self.S = S
+        self.g = g
+
+        self.V = Q/(B*H)
+        self.Fr = self.V / (g*H)**0.5
 
 def ParkerRiverGeom(param_in, param='Q_bf'): 
     '''
@@ -127,6 +131,35 @@ def AddGeometryPoint(bankfull,ax,color='k'):
     ax[0,1].plot(bankfull.Q,bankfull.B,'o',markersize=10,linewidth=10,color=color)
     ax[1,0].plot(bankfull.Q,bankfull.S,'o',markersize=10,linewidth=10,color=color)
     ax[1,1].plot(bankfull.H,bankfull.S,'o',markersize=10,linewidth=10,color=color)
+
+
+def PlotParkerRiverGeom_V_Fr(riverGeom):
+    '''Plot the bankfull velocity and Froude number vs bankfull width.
+    
+    '''
+
+    Q_bf_fit = np.linspace(2e-1,3e5,1000)
+    BF = ParkerRiverGeom(Q_bf_fit)
+
+    riverGeom['Fr'] = riverGeom['Ubf ms'] / np.sqrt(BF.g*riverGeom['Hbf m'])
+
+    fig, ax = plt.subplots(1,2,figsize=(9,4))
+
+    ax[0].scatter(riverGeom['Hbf m'], riverGeom['Ubf ms'])
+    ax[0].plot(BF.H,BF.V,'k--')
+    ax[0].set_xscale('log',base=10)
+    ax[0].set_xlabel(r'$H_{bf} \: (m)$') 
+    ax[0].set_ylabel(r'$V_{bf} \: (m/s)$')
+    ax[0].set_title('Velocity')
+
+    ax[1].scatter(riverGeom['Hbf m'], riverGeom['Fr'])
+    ax[1].plot(BF.H,BF.Fr,'k--')
+    ax[1].set_xscale('log',base=10)
+    ax[1].set_xlabel(r'$H_{bf} \: (m)$') 
+    ax[1].set_ylabel(r'$Fr$')
+    ax[1].set_title('Froude number')
+
+    return fig, ax
 
 
 # endregion

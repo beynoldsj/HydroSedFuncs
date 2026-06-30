@@ -2,6 +2,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy.integrate import solve_ivp
 from scipy.optimize import fsolve
+from scipy.optimize import minimize
+from scipy.optimize import Bounds
+from scipy.optimize import minimize_scalar
 
 # -------------------------------------------------------------------------------------------------
 # region BASIC HYDRAULIC FUNCTIONS
@@ -87,14 +90,20 @@ def TermVelMadsen(D_S,A=0.954,B=5.12,D_S_to_D_N=0.9,nu=1.e-6,rho_w=1000.,rho_s=2
 
     return v_s
 
-def RouseFits05(P):
+def RouseFits(P,ref_depth):
     '''Provides the J1 and J2 values for Rouse profiles integrals (Ref ASCE110 Equation 2-221)
     
     P: Rouse number
     '''
-
-    J1 = 1. / (1.1038 + 2.6626*P + 5.6497*P**2. + .3822*P**3. - .6174*P**4. + .1315*P**5. - .0091*P**6.) # ASCE110 2-221A
-    J2 = -1. / (1.2574 + 2.3159*P + 1.9239*P**2. - .3558*P**3. + .0075*P**4. +  .0064* P**5. - .0006*P**6) # ASCE110 2-221B
+    # empirical fits are ASCE110 2-221A and 2-221B with coefficients from the table that goes with em
+    if ref_depth == .05:
+        J1 = 1. / (1.1038 + 2.6626*P + 5.6497*P**2. + .3822*P**3. - .6174*P**4. + .1315*P**5. - .0091*P**6.)
+        J2 = -1. / (1.2574 + 2.3159*P + 1.9239*P**2. - .3558*P**3. + .0075*P**4. +  .0064* P**5. - .0006*P**6)
+    elif ref_depth == .1:
+        J1 = 1. / (1.1266 + 2.6239*P + 3.0838*P**2. + -.3636*P**3. + -.0734*P**4. + .0246*P**5. + -.0019*P**6.)
+        J2 = -1. / (1.4952 + 2.2041*P + 1.0552*P**2. + -.2372*P**3. + .0265*P**4. +  -.0008*P**5. + -.00005*P**6)
+    else:
+        raise ValueError('Error: RouseFits only setup for references of .05 or .1')
 
     return J1, J2
 
@@ -128,6 +137,167 @@ def AverageConcentration(z,C_a,P,H,ref_frac):
 
 
 # endregion
+
+
+# -------------------------------------------------------------------------------------------------
+# region STRESS PARTITION LOOKUP TABLE GENERATORS 
+
+def solve_Hs_Sf_Wright_Parker(H,V,D,D_to_ks=2,alpha_r=8.32,R=1.65,g=9.81):
+    '''Implements an iterative solver to get the two unkowns (H_s, flow depth corresponding to 
+    the skin friction; S_f, the friction slope) using 2 equation.
+    
+    H: total flow depth (m) 
+    V: flow velocity (m/s)
+    D: In this case should be D50. FIXME would need to think about how to handle multiple classes 
+    D_to_ks: multiplier to get roughness element size. See ASCE110 table FIXME 
+    alpha_r: coefficient in manning strickler. 8.32 is used in the paper 
+    R: specific grav
+    g: grave accel (m/s^2)
+    '''
+    q_w = V*H
+    H_s_guess = 0.4*H 
+    k_s = D*D_to_ks
+    def func(H_s):
+        Cz_s = alpha_r*(H_s/k_s)**(1/6)
+        S_f = (q_w/(H*Cz_s))**2 / (g*H_s)
+        tau_star_s = (H_s*S_f)/(R*D)
+        tau_star = (H*S_f)/(R*D)
+        Fr = V / np.sqrt(g*H) 
+        #return 0.05 + 0.7*(tau_star*Fr**0.7)**0.8 - tau_star_s 
+        return np.abs(0.05 + 0.7*(tau_star*Fr**0.7)**0.8 - tau_star_s)
+    
+    solve_out = minimize(func,H_s_guess,method='nelder-mead',options={'disp':False})
+    H_s_solve = solve_out.x[0]
+
+    return H_s_solve 
+
+
+def Cz_skin_drag_Wright_Parker(D50,H_range=[.1,10.1,.1],V_range=[.1,4.01,.01],
+                               D_to_ks=2,alpha_r=8.32,R=1.65,g=9.81,make_plots=True):
+    '''Creates lookup tables for the Wright Parker partition 
+    
+    D50: median grain size (mm) 
+    H_range: [start, stop, increment] for flow depth (m)
+    V_range: [start, stop, increment] for depth-avg velocity (m/s)
+    D_to_ks: multiplier to get roughness element size. See ASCE110 table FIXME 
+    alpha_r: coefficient in manning strickler. 8.32 is used in the paper 
+    R: specific grav
+    g: grave accel (m/s^2)
+    '''
+
+    k_s = D50*D_to_ks
+
+    H_arr = np.arange(H_range[0],H_range[1],H_range[2])
+    V_arr = np.arange(V_range[0],V_range[1],V_range[2])
+
+    n_H = len(H_arr)
+    n_V = len(V_arr)
+
+    H_mesh, V_mesh = np.meshgrid(H_arr,V_arr)
+
+    H_s_mesh = np.zeros_like(H_mesh)
+    Fr_mesh = np.zeros_like(H_mesh)
+    tau_star_s_mesh= np.zeros_like(H_mesh)
+    tau_star_mesh = np.zeros_like(H_mesh)
+    Cz_s_mesh = np.zeros_like(H_mesh)
+    Cz_mesh = np.zeros_like(H_mesh)
+
+
+    for ii in range(0,n_V):
+        for jj in range(0,n_H):
+            #print(V)
+
+            V = V_mesh[ii,jj]
+            H = H_mesh[ii,jj]
+
+            q_w = V*H 
+            Fr = V / np.sqrt(g*H)
+
+            H_s = solve_Hs_Sf_Wright_Parker(
+                H,V,D50,D_to_ks=D_to_ks,alpha_r=alpha_r,R=R,g=g
+                )    
+            Cz_s = alpha_r*(H_s/k_s)**(1/6)
+            S_f = (q_w/(H*Cz_s))**2 / (g*H_s)
+            tau_star_s = (H_s*S_f)/(R*D50)
+            tau_star = (H*S_f)/(R*D50)
+            u_star = np.sqrt(tau_star*R*g*D50)
+            Cz = V/u_star 
+
+
+            Fr_mesh[ii,jj] = Fr
+            H_s_mesh[ii,jj] = H_s
+            tau_star_s_mesh[ii,jj] = tau_star_s 
+            tau_star_mesh[ii,jj] = tau_star
+            Cz_s_mesh[ii,jj] = Cz_s 
+            Cz_mesh[ii,jj] = Cz
+
+
+    mask = tau_star_s_mesh<0.1
+
+    Cz_plot = Cz_mesh.copy() 
+    Cz_plot[mask] = np.nan
+
+    tau_star_s_plot = tau_star_s_mesh.copy()
+    tau_star_s_plot[mask] = np.nan
+
+    tau_star_plot = tau_star_mesh.copy() 
+    tau_star_plot[mask] =np.nan
+
+    tau_star_ratio_mesh = tau_star_s_mesh / tau_star_mesh
+    tau_star_ratio_plot = tau_star_ratio_mesh.copy()
+    tau_star_ratio_plot[mask] = np.nan
+
+    Fr_plot = Fr_mesh.copy()
+    Fr_plot[mask] = np.nan
+
+    if make_plots:
+        fig, ax = plt.subplots(3,3,figsize=(12,8),layout='constrained')
+        #ax[0,0].plot(V_mesh,Cz_plot,'k-')
+        ax[0,0].scatter(V_mesh,Cz_plot,c=H_mesh,cmap=cmc.cm.batlow)
+        ax[0,0].set_title('Dimensionless Chezy Number')
+        ax[0,0].set_xlabel(r'$V \quad (m s^{-1})$')
+        ax[0,0].set_ylabel(r'$Cz$')
+
+        ax[0,1].scatter(V_mesh,tau_star_s_plot,c=H_mesh,cmap=cmc.cm.batlow)
+        ax[0,1].set_title('Skin drag shields stress')
+        ax[0,1].set_ylabel(r'$\tau_s^*$')
+        ax[0,1].set_xlabel(r'$V \quad (m s^{-1})$')
+
+        mappable = ax[0,2].scatter(V_mesh,tau_star_ratio_plot,c=H_mesh,cmap=cmc.cm.batlow)
+        fig.colorbar(mappable)
+        ax[0,2].set_xlabel(r'$V \quad (m s^{-1})$')
+        ax[0,2].set_ylabel(r'$\tau_s^* / \tau^*$')
+        ax[0,2].set_title('Friction shields stress to total')
+
+        mappable = ax[1,0].pcolormesh(H_mesh,V_mesh,Cz_plot,cmap=cmc.cm.imola)
+        ax[1,0].set_xlabel(r'$H \quad (m)$')
+        ax[1,0].set_ylabel(r'$V \quad (m s^{-1})$')
+        cbar = fig.colorbar(mappable)
+        cbar.set_label(r'$Cz$')
+
+        mappable = ax[1,1].pcolormesh(H_mesh,V_mesh,tau_star_s_plot,cmap=cmc.cm.hawaii)
+        ax[1,1].set_xlabel(r'$H \quad (m)$')
+        ax[1,1].set_ylabel(r'$V \quad (m s^{-1})$')
+        cbar = fig.colorbar(mappable)
+        cbar.set_label(r'$\tau_s^*$')
+
+        mappable = ax[1,2].pcolormesh(H_mesh,V_mesh,tau_star_ratio_plot,cmap=cmc.cm.glasgow)
+        ax[1,2].set_xlabel(r'$H \quad (m)$')
+        ax[1,2].set_ylabel(r'$V \quad (m s^{-1})$')
+        cbar = fig.colorbar(mappable)
+        cbar.set_label(r'$\tau_s^* / \tau^*$')
+
+        ax[2,0].plot(tau_star_plot*Fr_plot**.7,tau_star_s_plot,'.')
+        ax[2,0].set_xlabel(r'$\tau^* Fr^{0.7}$')
+        ax[2,0].set_ylabel(r'$\tau_s^*$')
+
+        plt.show()
+
+    return Cz_plot, tau_star_s_plot
+
+
+# endregion
+
 
 # -------------------------------------------------------------------------------------------------
 # region SEDIMENT TRANSPORT METHODS 
@@ -202,6 +372,7 @@ class WrightParkerPlusDeLeeuw:
         self.lamb = lamb 
         self.g = g
         self.T = T
+        self.a_ref = 0.1 # reference depth (as fraction of full depth) for rouse profile. This relation uses 10%
         
         self.R = rho_s/rho_w-1.0 # specific gravity
         self.nu = KinematicViscosityFromTemp(T)
@@ -209,7 +380,7 @@ class WrightParkerPlusDeLeeuw:
         # settling velocity from Fergusion and Church (2004) as used in de Leeuw et al. (2020)
         self.v_s = self.R*g*D50**2 / ( 18*self.nu + (0.75*1*self.R*g*D50**3.)**0.5 ) 
 
-
+    
     def Cz(self,y,V,Fr):
         '''Take in stage and velocity as known during GVF steps. Calculate the dimensionless Chezy
         coefficient and the shear velocity corresponding ONLY to the skin friction.
@@ -229,6 +400,61 @@ class WrightParkerPlusDeLeeuw:
         u_star = np.sqrt(tau_b / self.rho_w)
         Cz = V/u_star 
         entrainment_inputs = {'u star sk': u_star_sk, 'Fr': Fr}
+        return Cz, entrainment_inputs
+
+    # # TAKE 2 - ees crap FIXME
+    # def Cz(self,y,V,Fr,y_sk_guess=None):
+    #     '''Take in stage and velocity as known during GVF steps. Calculate the dimensionless Chezy
+    #     coefficient and the shear velocity corresponding ONLY to the skin friction.
+
+    #     # y: stage 
+    #     # V: average velocity
+    #     # Fr: Froude number         
+
+    #     # FIXME should make y_sk_guess and optional paramater that can be ignored
+    #     '''
+    #     # FIXME should use hyrdraulic radius with calc from Sturm.
+    #     if y_sk_guess is None:
+    #         y_sk_guess = 0.5*y 
+
+    #     def f(y_sk):
+    #         Cz_sk = ManningStrickler(y_sk,self.D50,3.0) # fixed with iterative solve :(
+    #         S_f = (V/Cz_sk)**2 / (self.g*y_sk)
+    #         tau_star_sk = (y_sk*S_f) / (self.R*self.D50) # jk this is tau_star
+    #         tau_star = (y*S_f) / (self.R*self.D50)
+    #         print(0.05 + 0.7*( tau_star * (V/np.sqrt(self.g*y))**0.7 )**0.8 - tau_star_sk)
+    #         return np.abs(0.05 + 0.7*( tau_star * (V/np.sqrt(self.g*y))**0.7 )**0.8 - tau_star_sk)
+
+    #     bounds = Bounds([0],[y[0]])
+    #     solve_out = minimize(f,y_sk_guess,method='Nelder-Mead',bounds=bounds)
+    #     print(solve_out)
+    #     y_sk_solved = solve_out.x[0]
+    #     print('y_sk_solved', y_sk_solved)
+
+    #     #solve_out = fsolve(f,y_sk_guess)
+    #     #y_sk_solved = solve_out[0]
+
+    #     Cz_sk = ManningStrickler(y_sk_solved,self.D50,3.0) # fixed courtesy of solver above
+
+    #     u_star_sk = V/Cz_sk
+    #     tau_b_sk = u_star_sk**2. * self.rho_w 
+    #     tau_star_sk = tau_b_sk / (self.rho_w*self.R*self.g*self.D50) 
+    #     tau_star = ( (tau_star_sk-.05)/(0.7*Fr**0.56) )**1.25 # rearanged wright and parker (asce 110 eq 2-177)
+    #     tau_b = tau_star * (self.rho_w*self.R*self.g*self.D50) 
+    #     u_star = np.sqrt(tau_b / self.rho_w)
+    #     Cz = V/u_star 
+    #     entrainment_inputs = {'u star sk': u_star_sk, 'Fr': Fr, 'y sk':y_sk_solved}
+    #     return Cz, entrainment_inputs
+    
+    def Cz_no_par(self,y,V,Fr):
+        '''Take in stage and velocity as known during GVF steps. Calculate dinmensionless Chezy coefficient
+        assuming no bedform drag.
+        
+        '''
+
+        Cz = ManningStrickler(y,self.D50,3,alpha_r=8.32)/1
+        u_star = V/Cz 
+        entrainment_inputs = {'u star sk': u_star, 'Fr': Fr}
         return Cz, entrainment_inputs
     
     def E_s(self,entrainment_inputs):
@@ -256,8 +482,7 @@ class WrightParkerPlusDeLeeuw:
         y: flow depth
         '''
 
-        J1 = 1. / (1.1038 + 2.6626*P + 5.6497*P**2. + .3822*P**3. - .6174*P**4. + .1315*P**5. - .0091*P**6.) # ASCE110 2-221A
-        #J2 = -1. / (1.2574 + 2.3159*P + 1.9239*P**2. - .3558*P**3. + .0075*P**4. +  .0064* P**5. - .0006*P**6)
+        J1 = RouseFits(P,self.a_ref)[0]
 
         Cb = C/J1 # ASCE110 2-215
         return Cb
@@ -294,7 +519,7 @@ class WrightParkerPlusDeLeeuw:
             tau_b_sk = self.rho_w*self.g*y_sk*S
             tau_star_sk = tau_b_sk / (self.rho_w*self.R*self.g*self.D50)
 
-            Cz_sk = ManningStrickler(y,self.D50,3) # FIXME this should be using the assumed depth corresponding to skin drag
+            Cz_sk = ManningStrickler(y_sk,self.D50,3) # FIXME - FIXED to be the height corresponding to skin drag
             u_star_sk = np.sqrt(tau_b_sk/self.rho_w)
             U = Cz_sk*u_star_sk
             Fr = U / np.sqrt(self.g*y) # calculate the Froude number as if this iteration is turning out to give the correct flow depth
@@ -322,7 +547,7 @@ class WrightParkerPlusDeLeeuw:
         entrainment_inputs = {'u star sk': u_star_sk, 'Fr': Fr}
 
         c_b, P = self.E_s(entrainment_inputs)
-        c = c_b*RouseFits05(P)[0]
+        c = c_b*RouseFits(P,self.a_ref)[0]
 
         results_out = {'y_sk': y_sk_solved, 'U': U, 'Fr': Fr, 'q': q, 'c': c, 'c_b': c_b, 'P': P}
 
@@ -419,7 +644,9 @@ class TrapezoidChannel:
         def func(yp):
             return ( (yp*(1+yp))**1.5 ) / ( (1+2*yp)**0.5 ) - Z 
     
-        yp_solved = fsolve(func, 1.)[0]
+        solve_out = fsolve(func, 1.)
+        #print('crit depth solver:', solve_out)
+        yp_solved = solve_out[0]
         yc = yp_solved*self.b[ii]/self.m[ii]
         return yc
     
@@ -500,7 +727,7 @@ def SubcriticalGVF(chan,Q,y_out,transport=None):
         y_exit = y_out 
         exit_type = 'subcritical'
     else:
-        y_exit = y_c+.001
+        y_exit = y_c*1.01
         exit_type = 'critical'
 
     if transport is None:
@@ -517,6 +744,8 @@ def SubcriticalGVF(chan,Q,y_out,transport=None):
             R = chan.R(y,ii)
             SE = EnergySlope(chan.n[ii],V,R)
             F = chan.Fr(y,V,ii)
+            if F >= 1:
+                raise ValueError('Fr>1, SubcriticalGVG function only handles subcritical GVF')
             S0 = chan.S[ii]
             return -(S0-SE)/(1-F**2)
         
@@ -533,6 +762,11 @@ def SubcriticalGVF(chan,Q,y_out,transport=None):
             #E = SpecificEnergy(y,V)
             R = chan.R(y,ii)
             F = chan.Fr(y,V,ii)
+            #print(F)
+            #if F >= 1:
+            #    raise ValueError('Fr>1, solver only handles subcritical')
+            #print('ahh',y)
+            #Cz = transport.Cz(y,V,F)[0]
             Cz = transport.Cz(y,V,F)[0]
             n = ManningFromChezy(R,Cz) # FIXME havent thought too much about impact of cross section.
             SE = EnergySlope(n,V,R)
@@ -594,6 +828,7 @@ def ReservoirProblemSubcritical(chan,y_res_in,y_out,V_res=0.,transport=None,Q_gu
     #print(Q_guess,n_in_avg,chan.Kn,A_in_guess,R_in_guess,S_in_avg)
 
     def func(Q_g):
+        #print('Test GVF')
         y_g_all = SubcriticalGVF(chan,Q_g,y_out,transport=transport)
         y_g = y_g_all[0] 
         A_g = chan.A(y_g,0)
@@ -666,7 +901,7 @@ def QuasiSteadyTransport(chan,transport,y,Q,c_in) -> SedimentResults:
         P = np.interp(x,chan.x,P_of_x) # this is probably not strictly correct. Using the empirical rouse exponent
                                        # from De Leeuw, which likely corresponds to stratification at equilibtrium?
         #A = np.interp(x,chan.x,A_of_x)
-        J1 = RouseFits05(P)[0]
+        J1 = RouseFits(P,transport.a_ref)[0]
         c = Q_t/Q
         c_b = c/J1 # J1 provides the ratio of concentration at the .05H level to avg concentration.
 
@@ -683,7 +918,7 @@ def QuasiSteadyTransport(chan,transport,y,Q,c_in) -> SedimentResults:
 
     # back calculate average concentration and near-bed concentration
     c_soln = Q_t_soln / Q 
-    c_b_soln = c_soln / RouseFits05(P_of_x)[0]
+    c_b_soln = c_soln / RouseFits(P_of_x,transport.a_ref)[0]
 
     # back calculate the bed change rate
     eta_dot = -( v_s*(E_s_of_x-c_b_soln) ) / (1-transport.lamb) 
@@ -698,7 +933,7 @@ def QuasiSteadyTransport(chan,transport,y,Q,c_in) -> SedimentResults:
 # -------------------------------------------------------------------------------------------------
 # region PLOTTING FUNCTIONS 
 
-def PlotHydraulics(chan,y,Q,plot_critical=True,plot_normal=True,ax=None):
+def PlotHydraulics(chan,y,Q,plot_critical=True,plot_normal=True,ax=None,color=None,label=None):
     '''Function to show long profile
     
     
@@ -709,7 +944,6 @@ def PlotHydraulics(chan,y,Q,plot_critical=True,plot_normal=True,ax=None):
     Q: discharge (constant over channel distance)
     '''
     
-    fig, ax = plt.subplots(2,2,figsize=(12,6),layout='constrained')
 
     # calc profiles in absolute coordinates
     Y = chan.Y_B + y  # water surface 
@@ -720,44 +954,68 @@ def PlotHydraulics(chan,y,Q,plot_critical=True,plot_normal=True,ax=None):
 
     A_of_x = chan.A(y,np.arange(0,chan.nx)) 
     V_of_x = Q / A_of_x 
+    #print(V_of_x[-1])
     Fr_of_x = chan.Fr(y,V_of_x,np.arange(0,chan.nx))
 
     # plot
-    ax[0,0].plot(chan.x,y)
+    return_var = None
+    if ax is None:
+        fig, ax = plt.subplots(2,2,figsize=(12,6),layout='constrained')
+        return_var = (fig, ax)
 
-    ax[0,1].plot(chan.x,chan.Y_B,'k',label='Bed')
-    ax[0,1].plot(chan.x,Y,'b',label='Surf.')
-    if plot_critical:
-        ax[0,1].plot(chan.x,Y_c,'r--',label='Crit.')
-    if plot_normal:
-        ax[0,1].plot(chan.x,Y_0,'k--',label='Norm.')
+        ax[0,0].plot(chan.x,y,c=color)
 
-    ax[1,0].plot(chan.x,V_of_x)
+        ax[0,1].plot(chan.x,chan.Y_B,c=color,label='Bed')
+        ax[0,1].plot(chan.x,Y,'b',label='Surf.')
+        if plot_critical:
+            ax[0,1].plot(chan.x,Y_c,'r--',label='Crit.')
+        if plot_normal:
+            ax[0,1].plot(chan.x,Y_0,'k--',label='Norm.')
 
-    ax[1,1].plot(chan.x,Fr_of_x)
+        ax[1,0].plot(chan.x,V_of_x,c=color)
 
-    # clean up 
-    ax[0,0].set_ylabel('y (m)')
-    ax[0,0].set_title('Depth')
+        ax[1,1].plot(chan.x,Fr_of_x,c=color,label=label)
 
-    ax[0,1].set_ylabel('Y (m)')
-    ax[0,1].legend()
-    ax[0,1].set_title('Long Profile')
+        # clean up 
+        ax[0,0].set_ylabel('y (m)')
+        ax[0,0].set_title('Depth')
 
-    ax[1,0].set_xlabel('x (m)')
-    ax[1,0].set_ylabel('V (m/s)')
-    ax[1,0].set_title('Velocity')
-    ax[1,0].set_ylim([0,None])
-    
-    ax[1,1].set_xlabel('x (m)')
-    ax[1,1].set_ylabel('Fr')
-    ax[1,1].set_ylim([0,1])
-    ax[1,1].set_title('Froude Number')
+        ax[0,1].set_ylabel('Y (m)')
+        ax[0,1].legend()
+        ax[0,1].set_title('Long Profile')
+        if plot_critical:
+            ax[0,1].plot(chan.x,Y_c,'r--',label='Crit.')
+        if plot_normal:
+            ax[0,1].plot(chan.x,Y_0,'g--',label='Norm.')
 
-    return fig, ax
+        ax[1,0].set_xlabel('x (m)')
+        ax[1,0].set_ylabel('V (m/s)')
+        ax[1,0].set_title('Velocity')
+        
+        ax[1,1].set_xlabel('x (m)')
+        ax[1,1].set_ylabel('Fr')
+        ax[1,1].set_ylim([0,1])
+        ax[1,1].set_title('Froude Number')
 
+    else:
+        ax[0,0].plot(chan.x,y,c=color)
 
-def PlotSediment(chan,trans,y,Q,SedimentResults,ax=None):
+        ax[0,1].plot(chan.x,chan.Y_B,c=color,label='Bed')
+        ax[0,1].plot(chan.x,Y,'b',label='Surf.')
+        if plot_critical:
+            ax[0,1].plot(chan.x,Y_c,'r--') #,label='Crit.')
+        if plot_normal:
+            ax[0,1].plot(chan.x,Y_0,'g--') #,label='Norm.')
+
+        ax[1,0].plot(chan.x,V_of_x,c=color)
+        #ax[1,0].set_ylim([0,None])
+
+        ax[1,1].plot(chan.x,Fr_of_x,c=color,label=label)
+
+    ax[1,1].legend(ncols=2)
+    return return_var
+
+def PlotSediment(chan,trans,y,Q,SedimentResults,ax=None,color='k',label=None):
 
     A_of_x = chan.A(y,np.arange(0,chan.nx)) 
     V_of_x = Q / A_of_x 
@@ -771,49 +1029,54 @@ def PlotSediment(chan,trans,y,Q,SedimentResults,ax=None):
         fig, ax = plt.subplots(2,2,figsize=(12,6),layout='constrained')
         return_var = (fig, ax)
 
-        ax[0,0].plot(chan.x,SedimentResults.c_b)
-        ax[0,0].plot(chan.x,SedimentResults.E_s)
+        ax[0,0].plot(chan.x,SedimentResults.c_b,c=color)
+        ax[0,0].plot(chan.x,SedimentResults.E_s,'--',c=color)
         ax[0,0].set_ylabel('concentration (volumetric)')
         ax[0,0].legend(['c_b','E_s'])
-        ax[0,0].set_title('.05H entrainment and concentration')
+        ax[0,0].set_title('%.2fH entrainment and concentration' % trans.a_ref)
 
-        ax[0,1].plot(chan.x,SedimentResults.c)
+        ax[0,1].plot(chan.x,SedimentResults.c,c=color,label=label)
         ax[0,1].set_ylabel('concentration (volumetric)')
         ax[0,1].set_title('Average concentration')
 
-        ax[1,0].plot(chan.x,SedimentResults.eta_dot)
-        ax[1,0].plot([chan.x[0],chan.x[-1]], [0,0], 'k--')
+        ax[1,0].plot(chan.x,SedimentResults.eta_dot,c=color)
+        ax[1,0].plot([chan.x[0],chan.x[-1]], [0,0], 'r--')
         ax[1,0].set_xlabel('x (m)')
         ax[1,0].set_ylabel(r'$\eta$ (m/s)')
         ax[1,0].set_title('Bed change rate')
 
-
-        ax[1,1].plot(chan.x,chan.Y_B,'k',label='Bed')
+        ax[1,1].plot(chan.x,chan.Y_B,'k',label='Bed',c=color)
         ax[1,1].plot(chan.x,Y,'b',label='Surf.')
         ax[1,1].set_xlabel('x (m)')
         ax[1,1].set_ylabel('Y')
         ax[1,1].set_title('Bed and surface')
 
+        # ax[1,1].plot(chan.x,Cz)
+        # ax[1,1].set_xlabel('x (m)')
+        # ax[1,1].set_ylabel('Cz')
+        # ax[1,1].set_title('Dimensionless Chezy number')
+
     else:
         return_var = None
-        ax[0,0].plot(chan.x,SedimentResults.c_b)
-        ax[0,0].plot(chan.x,SedimentResults.E_s)
+        ax[0,0].plot(chan.x,SedimentResults.c_b,c=color)
+        ax[0,0].plot(chan.x,SedimentResults.E_s,'--',c=color)
 
-        ax[0,1].plot(chan.x,SedimentResults.c)
+        ax[0,1].plot(chan.x,SedimentResults.c,c=color,label=label)
 
-        ax[1,0].plot(chan.x,SedimentResults.eta_dot)
-        ax[1,0].plot([chan.x[0],chan.x[-1]], [0,0], 'k--')
+        ax[1,0].plot(chan.x,SedimentResults.eta_dot,c=color)
+        ax[1,0].plot([chan.x[0],chan.x[-1]], [0,0], 'r--')
 
-        ax[1,1].plot(chan.x,chan.Y_B,'k',label='Bed')
+        ax[1,1].plot(chan.x,chan.Y_B,c=color,label='Bed')
         ax[1,1].plot(chan.x,Y,'b',label='Surf.')
 
-    #ax[1,1].plot(chan.x,Cz)
-    #ax[1,1].set_xlabel('x (m)')
-    #ax[1,1].set_ylabel('Cz')
-    #ax[1,1].set_title('Dimensionless Chezy number')
+        # ax[1,1].plot(chan.x,Cz)
+        # ax[1,1].set_xlabel('x (m)')
+        # ax[1,1].set_ylabel('Cz')
+        # ax[1,1].set_title('Dimensionless Chezy number')
     
+
+    ax[0,1].legend(ncols=2)
     return return_var
 
 # endregion
-
 
