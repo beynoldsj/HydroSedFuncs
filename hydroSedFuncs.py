@@ -1,10 +1,15 @@
 import numpy as np 
-import matplotlib.pyplot as plt
 from scipy.integrate import solve_ivp
 from scipy.optimize import fsolve
 from scipy.optimize import minimize
 from scipy.optimize import Bounds
 from scipy.optimize import minimize_scalar
+from scipy.interpolate import RegularGridInterpolator
+
+import matplotlib.pyplot as plt
+import cmcrameri as cmc
+
+
 
 # -------------------------------------------------------------------------------------------------
 # region BASIC HYDRAULIC FUNCTIONS
@@ -173,7 +178,7 @@ def solve_Hs_Sf_Wright_Parker(H,V,D,D_to_ks=2,alpha_r=8.32,R=1.65,g=9.81):
 
 
 def Cz_skin_drag_Wright_Parker(D50,H_range=[.1,10.1,.1],V_range=[.1,4.01,.01],
-                               D_to_ks=2,alpha_r=8.32,R=1.65,g=9.81,make_plots=True):
+                               D_to_ks=2.,alpha_r=8.32,R=1.65,g=9.81,tau_star_s_min=0.08,make_plots=True):
     '''Creates lookup tables for the Wright Parker partition 
     
     D50: median grain size (mm) 
@@ -183,6 +188,8 @@ def Cz_skin_drag_Wright_Parker(D50,H_range=[.1,10.1,.1],V_range=[.1,4.01,.01],
     alpha_r: coefficient in manning strickler. 8.32 is used in the paper 
     R: specific grav
     g: grave accel (m/s^2)
+    tau_star_s_min: the solution only works for roughly tau_star_s>.08 (can maybe nudge
+    a bit lower to have slower velocities included in solution.)
     '''
 
     k_s = D50*D_to_ks
@@ -202,7 +209,7 @@ def Cz_skin_drag_Wright_Parker(D50,H_range=[.1,10.1,.1],V_range=[.1,4.01,.01],
     Cz_s_mesh = np.zeros_like(H_mesh)
     Cz_mesh = np.zeros_like(H_mesh)
 
-
+    print('Generating Wright Parker stress partition lookup')
     for ii in range(0,n_V):
         for jj in range(0,n_H):
             #print(V)
@@ -232,7 +239,7 @@ def Cz_skin_drag_Wright_Parker(D50,H_range=[.1,10.1,.1],V_range=[.1,4.01,.01],
             Cz_mesh[ii,jj] = Cz
 
 
-    mask = tau_star_s_mesh<0.1
+    mask = tau_star_s_mesh<tau_star_s_min
 
     Cz_plot = Cz_mesh.copy() 
     Cz_plot[mask] = np.nan
@@ -267,9 +274,11 @@ def Cz_skin_drag_Wright_Parker(D50,H_range=[.1,10.1,.1],V_range=[.1,4.01,.01],
         fig.colorbar(mappable)
         ax[0,2].set_xlabel(r'$V \quad (m s^{-1})$')
         ax[0,2].set_ylabel(r'$\tau_s^* / \tau^*$')
-        ax[0,2].set_title('Friction shields stress to total')
+        ax[0,2].set_title('Skin shields stress to total')
 
-        mappable = ax[1,0].pcolormesh(H_mesh,V_mesh,Cz_plot,cmap=cmc.cm.imola)
+        Cz_05 = np.nanpercentile(Cz_plot,5)
+        Cz_95 = np.nanpercentile(Cz_plot,95)
+        mappable = ax[1,0].pcolormesh(H_mesh,V_mesh,Cz_plot,vmin=Cz_05,vmax=Cz_95,cmap=cmc.cm.imola)
         ax[1,0].set_xlabel(r'$H \quad (m)$')
         ax[1,0].set_ylabel(r'$V \quad (m s^{-1})$')
         cbar = fig.colorbar(mappable)
@@ -290,10 +299,18 @@ def Cz_skin_drag_Wright_Parker(D50,H_range=[.1,10.1,.1],V_range=[.1,4.01,.01],
         ax[2,0].plot(tau_star_plot*Fr_plot**.7,tau_star_s_plot,'.')
         ax[2,0].set_xlabel(r'$\tau^* Fr^{0.7}$')
         ax[2,0].set_ylabel(r'$\tau_s^*$')
+        ax[2,0].set_title(r'Check $\tau_s^* = .05 + 0.7(\tau^* Fr^{0.7})^{0.8}$')
+
+        mappable = ax[2,1].pcolormesh(H_mesh,V_mesh,Fr_plot,vmin=0,vmax=2,cmap=cmc.cm.vik)
+        ax[2,1].set_xlabel(r'$H \quad (m)$')
+        ax[2,1].set_ylabel(r'$V \quad (m s^{-1})$')
+        cbar = fig.colorbar(mappable)
+        cbar.set_label(r'$Fr$')
+        ax[2,1].set_title('Froude number')
 
         plt.show()
 
-    return Cz_plot, tau_star_s_plot
+    return H_mesh, V_mesh, Cz_plot, tau_star_s_plot
 
 
 # endregion
@@ -354,6 +371,10 @@ class WrightParkerPlusDeLeeuw:
     lamb=0.3: porosity of sediment in active layer
     g=9.81: gravity 
     T=20.0: Temperature (C)
+    y_range: [start,stop,step] = [.1,10.1,.1] this is range of flow depths to use
+        for Cz lookup
+    V_range: [start,stop,step] = [.1,4.01,.01] this is range of depth-avg velocities
+        to use for Cz lookup
     
     Note that the partitioning setup is out of its typical application. Usually, a known stage 
     and velocity would give a basal stress and thus shields stress. Then the partitioning 
@@ -365,7 +386,8 @@ class WrightParkerPlusDeLeeuw:
     solution. 
     '''
 
-    def __init__(self,D50,rho_w=1000.,rho_s=2650.,lamb=0.3,g=9.81,T=20.):
+    def __init__(self,D50,D_to_ks=3.0,rho_w=1000.,rho_s=2650.,lamb=0.3,g=9.81,T=20.,
+                 y_range=[.1,10.1,.1],V_range=[.1,4.01,.01]):
         self.D50 = D50 
         self.rho_w = rho_w 
         self.rho_s = rho_s
@@ -380,6 +402,11 @@ class WrightParkerPlusDeLeeuw:
         # settling velocity from Fergusion and Church (2004) as used in de Leeuw et al. (2020)
         self.v_s = self.R*g*D50**2 / ( 18*self.nu + (0.75*1*self.R*g*D50**3.)**0.5 ) 
 
+        # generate lookup table for Cz and for tau_star_s as a function of flow depth and velocity 
+        self.y_mesh, self.V_mesh, self.Cz_mesh, self.tau_star_sk_mesh = Cz_skin_drag_Wright_Parker(
+            D50,y_range,V_range,D_to_ks=D_to_ks,alpha_r=8.32,R=self.R,g=g
+        )
+        
     
     def Cz(self,y,V,Fr):
         '''Take in stage and velocity as known during GVF steps. Calculate the dimensionless Chezy
@@ -390,7 +417,7 @@ class WrightParkerPlusDeLeeuw:
         # Fr: Froude number         
         '''
         # FIXME should use hyrdraulic radius with calc from Sturm.
-        Cz_sk = ManningStrickler(y,self.D50,3.0) # FIXME should be using the height corresponding to skin drag, which we don't know
+        Cz_sk = ManningStrickler(y,self.D50,3.0,alpha_r=8.32) # FIXME should be using the height corresponding to skin drag, which we don't know
 
         u_star_sk = V/Cz_sk
         tau_b_sk = u_star_sk**2. * self.rho_w 
@@ -401,6 +428,24 @@ class WrightParkerPlusDeLeeuw:
         Cz = V/u_star 
         entrainment_inputs = {'u star sk': u_star_sk, 'Fr': Fr}
         return Cz, entrainment_inputs
+
+    # TAKE 3 - using lookup table approach
+    def Cz2(self,y,V):
+
+        interp_Cz = RegularGridInterpolator((self.V_mesh[:,0],self.y_mesh[0,:]), self.Cz_mesh)
+        interp_tau_star_sk = RegularGridInterpolator((self.V_mesh[:,0],self.y_mesh[0,:]), self.tau_star_sk_mesh)
+
+        Cz = interp_Cz((V,y))
+        tau_star_sk = interp_tau_star_sk((V,y))
+        u_star_sk = np.sqrt(tau_star_sk*self.R*self.rho_w*self.D50)
+
+        Fr = V/np.sqrt(self.g*y) # FIXME this is froude number for wide / rectangle channel, not trapezoid.
+                                 # But generally not considering trapezoid for sed trans here
+        
+        entrainment_inputs = {'u star sk': u_star_sk, 'Fr': Fr}
+        return Cz, entrainment_inputs
+        
+
 
     # # TAKE 2 - ees crap FIXME
     # def Cz(self,y,V,Fr,y_sk_guess=None):
