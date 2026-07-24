@@ -375,6 +375,8 @@ class WrightParkerPlusDeLeeuw:
         for Cz lookup
     V_range: [start,stop,step] = [.1,4.01,.01] this is range of depth-avg velocities
         to use for Cz lookup
+    tau_star_min: tau_star_s vs tau_str Fr**.7 plot does not work down to tau_star_s=0.
+        0.08 is safe but can nudge a bit lower if low velocities are needed.
     
     Note that the partitioning setup is out of its typical application. Usually, a known stage 
     and velocity would give a basal stress and thus shields stress. Then the partitioning 
@@ -387,7 +389,7 @@ class WrightParkerPlusDeLeeuw:
     '''
 
     def __init__(self,D50,D_to_ks=3.0,rho_w=1000.,rho_s=2650.,lamb=0.3,g=9.81,T=20.,
-                 y_range=[.1,10.1,.1],V_range=[.1,4.01,.01]):
+                 y_range=[.1,10.1,.1],V_range=[.1,4.01,.01],tau_star_min=.08):
         self.D50 = D50 
         self.rho_w = rho_w 
         self.rho_s = rho_s
@@ -404,11 +406,11 @@ class WrightParkerPlusDeLeeuw:
 
         # generate lookup table for Cz and for tau_star_s as a function of flow depth and velocity 
         self.y_mesh, self.V_mesh, self.Cz_mesh, self.tau_star_sk_mesh = Cz_skin_drag_Wright_Parker(
-            D50,y_range,V_range,D_to_ks=D_to_ks,alpha_r=8.32,R=self.R,g=g
+            D50,y_range,V_range,D_to_ks=D_to_ks,alpha_r=8.32,R=self.R,g=g,tau_star_s_min=tau_star_min
         )
         
     
-    def Cz(self,y,V,Fr):
+    def Cz2(self,y,V,Fr):
         '''Take in stage and velocity as known during GVF steps. Calculate the dimensionless Chezy
         coefficient and the shear velocity corresponding ONLY to the skin friction.
 
@@ -430,14 +432,20 @@ class WrightParkerPlusDeLeeuw:
         return Cz, entrainment_inputs
 
     # TAKE 3 - using lookup table approach
-    def Cz2(self,y,V):
+    def Cz(self,y,V):
+        '''Take in stage and velocity as known during GVF steps. Calculate the dimensionless Chezy
+        coefficient and the shear velocity corresponding ONLY to the skin friction.
+
+        # y: stage 
+        # V: average velocity
+        '''
 
         interp_Cz = RegularGridInterpolator((self.V_mesh[:,0],self.y_mesh[0,:]), self.Cz_mesh)
         interp_tau_star_sk = RegularGridInterpolator((self.V_mesh[:,0],self.y_mesh[0,:]), self.tau_star_sk_mesh)
 
         Cz = interp_Cz((V,y))
         tau_star_sk = interp_tau_star_sk((V,y))
-        u_star_sk = np.sqrt(tau_star_sk*self.R*self.rho_w*self.D50)
+        u_star_sk = np.sqrt(tau_star_sk*self.R*self.g*self.D50)
 
         Fr = V/np.sqrt(self.g*y) # FIXME this is froude number for wide / rectangle channel, not trapezoid.
                                  # But generally not considering trapezoid for sed trans here
@@ -583,7 +591,7 @@ class WrightParkerPlusDeLeeuw:
         tau_b_sk = self.rho_w*self.g*y_sk_solved*S
         tau_star_sk = tau_b_sk / (self.rho_w*self.R*self.g*self.D50)
 
-        Cz_sk = ManningStrickler(y,self.D50,3) # FIXME this should be using the assumed depth corresponding to skin drag
+        Cz_sk = ManningStrickler(y_sk_solved,self.D50,3,alpha_r=8.32) 
         u_star_sk = np.sqrt(tau_b_sk/self.rho_w)
         U = Cz_sk*u_star_sk
         Fr = U / np.sqrt(self.g*y)
@@ -594,7 +602,8 @@ class WrightParkerPlusDeLeeuw:
         c_b, P = self.E_s(entrainment_inputs)
         c = c_b*RouseFits(P,self.a_ref)[0]
 
-        results_out = {'y_sk': y_sk_solved, 'U': U, 'Fr': Fr, 'q': q, 'c': c, 'c_b': c_b, 'P': P}
+        results_out = {'y_sk': y_sk_solved, 'tau_star_sk': tau_star_sk, 'u_star_sk':u_star_sk, 'U': U,
+                       'Fr': Fr, 'q': q, 'c': c, 'c_b': c_b, 'P': P}
 
         return results_out 
 
@@ -812,7 +821,7 @@ def SubcriticalGVF(chan,Q,y_out,transport=None):
             #    raise ValueError('Fr>1, solver only handles subcritical')
             #print('ahh',y)
             #Cz = transport.Cz(y,V,F)[0]
-            Cz = transport.Cz(y,V,F)[0]
+            Cz = transport.Cz(y,V)[0]
             n = ManningFromChezy(R,Cz) # FIXME havent thought too much about impact of cross section.
             SE = EnergySlope(n,V,R)
             S0 = chan.S[ii]
@@ -932,7 +941,7 @@ def QuasiSteadyTransport(chan,transport,y,Q,c_in) -> SedimentResults:
 
     Fr_of_x = chan.Fr(y,V_of_x,np.arange(0,chan.nx))
     
-    Cz_of_x, entrain_in = transport.Cz(y,V_of_x,Fr_of_x)
+    Cz_of_x, entrain_in = transport.Cz(y,V_of_x)
     E_s_of_x, P_of_x =  transport.E_s(entrain_in)
 
     dx = chan.x[1] - chan.x[0]
@@ -1065,7 +1074,7 @@ def PlotSediment(chan,trans,y,Q,SedimentResults,ax=None,color='k',label=None):
     A_of_x = chan.A(y,np.arange(0,chan.nx)) 
     V_of_x = Q / A_of_x 
     Fr_of_x = chan.Fr(y,V_of_x,np.arange(0,chan.nx))
-    Cz = trans.Cz(y,V_of_x,Fr_of_x)[0]
+    Cz = trans.Cz(y,V_of_x)[0]
 
     Y = chan.Y_B + y
 
