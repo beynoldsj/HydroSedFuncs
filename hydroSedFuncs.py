@@ -255,7 +255,16 @@ def Cz_skin_drag_Wright_Parker(D50,H_range=[.1,10.1,.1],V_range=[.1,4.01,.01],
     tau_star_ratio_plot[mask] = np.nan
 
     Fr_plot = Fr_mesh.copy()
-    Fr_plot[mask] = np.nan
+    Fr_plot[mask] = np.nan 
+
+    # EXTEND THE LAST VALUE IN EACH COLUMN ALL THE WAY, AVOID OUT OF RANGE ERRORS
+    # FIXME SHOULD ADD SOME WARNING FOR THIS
+    for kk in np.arange(0,np.shape(mask)[1]):
+        Cz_col = Cz_plot[:,kk]
+        Cz_col[np.isnan(Cz_col)] = np.nanmax(Cz_col)
+
+        tau_star_s_col = tau_star_s_plot[:,kk]
+        tau_star_s_col[np.isnan(tau_star_s_col)] = np.nanmin(tau_star_s_col)
 
     if make_plots:
         fig, ax = plt.subplots(3,3,figsize=(12,8),layout='constrained')
@@ -271,14 +280,16 @@ def Cz_skin_drag_Wright_Parker(D50,H_range=[.1,10.1,.1],V_range=[.1,4.01,.01],
         ax[0,1].set_xlabel(r'$V \quad (m s^{-1})$')
 
         mappable = ax[0,2].scatter(V_mesh,tau_star_ratio_plot,c=H_mesh,cmap=cmc.cm.batlow)
-        fig.colorbar(mappable)
+        cbar = fig.colorbar(mappable)
         ax[0,2].set_xlabel(r'$V \quad (m s^{-1})$')
         ax[0,2].set_ylabel(r'$\tau_s^* / \tau^*$')
         ax[0,2].set_title('Skin shields stress to total')
+        cbar.set_label(r'$H \: (m)$')
 
         Cz_05 = np.nanpercentile(Cz_plot,5)
         Cz_95 = np.nanpercentile(Cz_plot,95)
         mappable = ax[1,0].pcolormesh(H_mesh,V_mesh,Cz_plot,vmin=Cz_05,vmax=Cz_95,cmap=cmc.cm.imola)
+        #mappable = ax[1,0].pcolormesh(H_mesh,V_mesh,Cz_plot,cmap=cmc.cm.imola)
         ax[1,0].set_xlabel(r'$H \quad (m)$')
         ax[1,0].set_ylabel(r'$V \quad (m s^{-1})$')
         cbar = fig.colorbar(mappable)
@@ -307,6 +318,16 @@ def Cz_skin_drag_Wright_Parker(D50,H_range=[.1,10.1,.1],V_range=[.1,4.01,.01],
         cbar = fig.colorbar(mappable)
         cbar.set_label(r'$Fr$')
         ax[2,1].set_title('Froude number')
+
+        #Cz_05 = np.nanpercentile(Cz_plot,5)
+        #Cz_95 = np.nanpercentile(Cz_plot,95)
+        u_star_s_plot = np.sqrt(tau_star_s_plot*R*g*D50)
+        mappable = ax[2,2].pcolormesh(H_mesh,V_mesh,u_star_s_plot,cmap=cmc.cm.hawaii)
+        ax[2,2].set_xlabel(r'$H \quad (m)$')
+        ax[2,2].set_ylabel(r'$V \quad (m s^{-1})$')
+        cbar = fig.colorbar(mappable)
+        cbar.set_label(r'$u^*_s$')
+        ax[2,2].set_title('Shear velocity skin component')
 
         plt.show()
 
@@ -440,8 +461,11 @@ class WrightParkerPlusDeLeeuw:
         # V: average velocity
         '''
 
-        interp_Cz = RegularGridInterpolator((self.V_mesh[:,0],self.y_mesh[0,:]), self.Cz_mesh)
-        interp_tau_star_sk = RegularGridInterpolator((self.V_mesh[:,0],self.y_mesh[0,:]), self.tau_star_sk_mesh)
+        # FIXME should have warning for going out of bounds
+        interp_Cz = RegularGridInterpolator((self.V_mesh[:,0],self.y_mesh[0,:]), self.Cz_mesh,
+                                            bounds_error=False,fill_value=None)
+        interp_tau_star_sk = RegularGridInterpolator((self.V_mesh[:,0],self.y_mesh[0,:]), self.tau_star_sk_mesh,
+                                                     bounds_error=False,fill_value=None)
 
         Cz = interp_Cz((V,y))
         tau_star_sk = interp_tau_star_sk((V,y))
