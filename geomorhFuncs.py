@@ -1,3 +1,8 @@
+'''
+This module contains functions for empirical fluvial geomorphology relationships.
+Ben Reynolds, 2026
+'''
+
 import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -198,3 +203,23 @@ def SpecificStreamPower(U,H,S,rho_w=1000,g=9.81):
     omega = rho_w*g*U*H*S
     
     return omega 
+
+
+# endregion
+
+
+# -------------------------------------------------------------------------------------------------
+# region Typical scalings regarding meandering river kinematics
+
+def tau_cut(tau_w,W_over_H):
+    '''Meandering river cutoff timescale from Geyman et al.(2025) Scaling laws for sediment storage
+    and turnover in floodplains. 
+    
+    tau_w = W/M_avg where W is width and M_avg = average meander migration rate. Time to migrate
+        1 channel width. 100 is the base estimate (1% rule). Varies from ~10 to ~1000 years with
+        far tails at 1 year and 10000 years. 
+    W_over_H = W/H (no way) where W is width and H is depth. Can use parker emprical fits above 
+        to estiamte.
+    '''
+    A = 810 / (W_over_H)
+    return A*tau_w

@@ -1,3 +1,9 @@
+'''
+This module contains functions for hydraulics and sediment tranpsort.
+Ben Reynolds, 2026
+'''
+
+
 import numpy as np 
 from scipy.integrate import solve_ivp
 from scipy.optimize import fsolve
@@ -1009,6 +1015,120 @@ def QuasiSteadyTransport(chan,transport,y,Q,c_in) -> SedimentResults:
 # endregion
 
 # -------------------------------------------------------------------------------------------------
+# region MORPHODYNAMIC SIMULATIONS  
+
+class MorphoResults:
+    def __init__(self,time_steps):
+        n_time_steps = len(time_steps)
+        self.t_steps = time_steps 
+        self.n_t_steps = n_time_steps 
+
+        self.Y_B_in = np.zeros(n_time_steps)
+        self.Y_B_out = np.zeros(n_time_steps)
+        self.Q_of_t = np.zeros(n_time_steps)
+        self.c_in_of_t = np.zeros(n_time_steps)
+        self.eta_dot_in = np.zeros(n_time_steps)
+        self.eta_dot_out = np.zeros(n_time_steps)
+        self.Y_B_in[:] = np.nan
+        self.Y_B_out[:] = np.nan
+        self.Q_of_t[:] = np.nan
+        self.c_in_of_t[:] = np.nan
+        self.eta_dot_in[:] = np.nan
+        self.eta_dot_out[:] = np.nan
+
+def AlwaysTrue(chan):
+    return True
+
+def RunCutoffSimulation(chan,Y_BR1,Y_BR2,BF,trans,H_of_t,t_step,t_stop,plot_inc=None,exit_func=AlwaysTrue):
+    '''
+    Code to run a morpodynamic simulation of some period of flow using a chan and trans input
+
+    chan: TrapezoidalChannel class object or equivalent class
+    Y_BR1: height of river bed on upstream end of cutoff (m)
+    Y_BR2: height of river bed on downstram end of cutoff (m)
+    BF: bankfull properties of rivers from geomorphFuncs BankFull geometry class
+    trans: WrightParkerAndDeeleuw class object of equivalent if made
+    H_of_t: a function that takes in a time and returns a river stage
+    t_step: time step (s) for the simulation 
+    t_stop: end time (s) for simulation 
+    plot_inc: time intervals (s) to add lines to the long profile plots of hydraulics and morphology.
+        Leave set as None to make no plots.
+    exit_func: a function that takes in chan and determines whether an exit condition (e.g. inlet flow 
+        depth) has been met. Default function allows sim to attempt to run to end.
+    '''
+
+    n_plots = int(t_stop/(t_step*plot_inc))
+    colors = cmc.cm.batlow(np.linspace(0,1,n_plots+1))
+
+    norm_flow = trans.normalFlowWide(H_of_t(0),BF.S)
+
+    z_over = np.linspace(chan.Y_B[0]-Y_BR1,H_of_t(0),500)
+    c_over_avg = AverageConcentration(z_over,norm_flow['c_b'],norm_flow['P'],H_of_t(0),trans.a_ref)
+
+    y_in = (Y_BR1+H_of_t(0))-chan.Y_B[0] 
+    y_out = (Y_BR2+H_of_t(0))-chan.Y_B[-1]
+    Q = ReservoirProblemSubcritical(chan,y_in,y_out,transport=trans) # NOTE this is not just for plotting, 
+                                                                    # provices the first Q guess
+    y = SubcriticalGVF(chan,Q,y_out,transport=trans)
+    sed_results = QuasiSteadyTransport(chan, trans, y, Q, c_over_avg)
+
+    if plot_inc is not None:
+        fig, ax1 = PlotHydraulics(chan,y,Q,plot_normal=False)
+        fig, ax2 = PlotSediment(chan,trans,y,Q,sed_results)
+
+    # FIXME should probably go to adaptive time stepping based on bed change rate
+    t_steps = np.arange(0,t_stop+.0001,t_step)
+
+    morph_results = MorphoResults(t_steps)
+
+    ii = 0
+    jj = 0
+    for t in t_steps:
+        H = H_of_t(t)
+        norm_flow = trans.normalFlowWide(H,BF.S)
+
+        z_over = np.linspace(chan.Y_B[0]-Y_BR1,H,500)
+        c_over_avg = AverageConcentration(z_over,norm_flow['c_b'],norm_flow['P'],H,trans.a_ref)
+
+        y_in = (Y_BR1+H)-chan.Y_B[0] 
+        y_out = (Y_BR2+H)-chan.Y_B[-1]
+
+        Q = ReservoirProblemSubcritical(chan,y_in,y_out,transport=trans,Q_guess=Q)
+        y = SubcriticalGVF(chan,Q,y_out,transport=trans)
+        sed_results = QuasiSteadyTransport(chan, trans, y, Q, c_over_avg)
+
+        morph_results.Y_B_in[ii] = chan.Y_B[0] 
+        morph_results.Y_B_out[ii] = chan.Y_B[-1]
+        morph_results.Q_of_t[ii] = Q
+        morph_results.c_in_of_t[ii] = c_over_avg
+        morph_results.eta_dot_in[ii] = sed_results.eta_dot[0]
+        morph_results.eta_dot_out[ii] = sed_results.eta_dot[-1]
+
+        chan.update_bed(sed_results.eta_dot*t_step)
+
+        if plot_inc is not None:
+            if np.mod(t,(t_step*plot_inc)) == 0:
+                label_jj = (r'$t=%.2f \; hrs$' % (t/60**2))
+                print(t/(60**2))
+                PlotHydraulics(chan,y,Q,plot_normal=False,ax=ax1,color=colors[jj],label=label_jj)
+                PlotSediment(chan,trans,y,Q,sed_results,ax=ax2,color=colors[jj],label=label_jj)
+                jj+=1
+
+
+        # FIXME add depth criterion to say channel is plugged, exit.
+
+        if not exit_func(chan):
+            break
+
+        ii+=1
+
+
+    return chan, morph_results
+
+
+# end region
+
+# -------------------------------------------------------------------------------------------------
 # region PLOTTING FUNCTIONS 
 
 def PlotHydraulics(chan,y,Q,plot_critical=True,plot_normal=True,ax=None,color=None,label=None):
@@ -1155,6 +1275,35 @@ def PlotSediment(chan,trans,y,Q,SedimentResults,ax=None,color='k',label=None):
 
     ax[0,1].legend(ncols=2)
     return return_var
+
+
+def PlotChuteSim(morph_results:MorphoResults):
+
+    fig, ax = plt.subplots(2,2,figsize=(12,9),layout='constrained')
+    ax[0,0].plot(morph_results.t_steps/(60*60),morph_results.Y_B_in)
+    ax[0,0].plot(morph_results.t_steps/(60*60),morph_results.Y_B_out)
+    ax[0,0].set_xlabel('time (hr)')
+    ax[0,0].set_ylabel('z (m)')
+    ax[0,0].legend(['inlet','outlet'])
+    ax[0,0].set_title('Chute inlet and outlet bed elevation')
+
+    ax[0,1].plot(morph_results.t_steps/(60*60),morph_results.Q_of_t)
+    ax[0,1].set_xlabel('time (hr)')
+    ax[0,1].set_ylabel('Q (cms)')
+    ax[0,1].set_title('Channel discharge')
+
+    ax[1,0].plot(morph_results.t_steps/(60*60),morph_results.c_in_of_t)
+    ax[1,0].set_xlabel('time (hr)')
+    ax[1,0].set_ylabel('c_in (m^3/m^3)')
+    ax[1,0].set_title('Inlet sediment concentration')
+
+    ax[1,1].plot(morph_results.t_steps/(60*60),morph_results.eta_dot_in)
+    ax[1,1].plot(morph_results.t_steps/(60*60),morph_results.eta_dot_out)
+    ax[1,1].set_xlabel('time (hr)')
+    ax[1,1].set_ylabel('eta (m/s)')
+    ax[1,1].set_title('Inlet and outlet bed change rate')
+
+    return fig, ax
 
 # endregion
 
