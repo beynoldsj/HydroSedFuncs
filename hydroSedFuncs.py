@@ -15,6 +15,8 @@ from scipy.interpolate import RegularGridInterpolator
 import matplotlib.pyplot as plt
 import cmcrameri as cmc
 
+from abc import ABC, abstractmethod
+import copy
 
 
 # -------------------------------------------------------------------------------------------------
@@ -1018,10 +1020,14 @@ def QuasiSteadyTransport(chan,transport,y,Q,c_in) -> SedimentResults:
 # region MORPHODYNAMIC SIMULATIONS  
 
 class MorphoResults:
+    '''
+    Class to hold outputs from running the chute cutoff morphodynamic sim below
+    '''
+
     def __init__(self,time_steps):
         n_time_steps = len(time_steps)
         self.t_steps = time_steps 
-        self.n_t_steps = n_time_steps 
+        #self.n_t_steps = n_time_steps 
 
         self.Y_B_in = np.zeros(n_time_steps)
         self.Y_B_out = np.zeros(n_time_steps)
@@ -1036,10 +1042,77 @@ class MorphoResults:
         self.eta_dot_in[:] = np.nan
         self.eta_dot_out[:] = np.nan
 
-def AlwaysTrue(chan):
-    return True
+    def combine(self, morph_results_append:MorphoResults):
+        morph_results_out = copy.deepcopy(self)
+        morph_results2 = copy.deepcopy(morph_results_append)
+        morph_results2.t_steps = morph_results2.t_steps + self.t_steps[-1]
+        for key in self.__dict__.keys():
+            setattr(morph_results_out,key,
+                    np.concat([getattr(self,key),getattr(morph_results2,key)]))
 
-def RunCutoffSimulation(chan,Y_BR1,Y_BR2,BF,trans,H_of_t,t_step,t_stop,plot_inc=None,exit_func=AlwaysTrue):
+        return morph_results_out
+
+
+
+
+# def RunToEnd(chan:TrapezoidChannel, morph_results:MorphoResults):
+#     '''
+#     Dummy function to allow below to run to end time (or error), but takes in the variables
+#     you'd want to make a custom function that has exit criteria.
+#     '''
+#     return 0
+
+class ChuteSimExit(ABC):
+    @abstractmethod 
+    def test(self):
+        '''Return exit flag where 0 means continue sim'''
+        pass
+
+class ExitOnSteadyOrFill:
+    def __init__(self,min_inlet_ele:float,max_inlet_ele:float,t_step:float,t_steady:float,h_tol:float=.001):
+        self.min_inlet_ele = min_inlet_ele 
+        self.max_inlet_ele = max_inlet_ele 
+        self.t_steady = t_steady 
+        self.t_step = t_step
+        self.h_tol = h_tol
+
+    def test(self,chan:TrapezoidChannel, morph_results:MorphoResults):
+        Y_B_in = morph_results.Y_B_in
+        Y_B_in_full = Y_B_in[np.invert(np.isnan(Y_B_in))]
+        Y_B_in_last = Y_B_in_full[-1]
+        #print(Y_B_in_last)
+        if Y_B_in_last <= self.min_inlet_ele: # check for erosion to river level
+            exit_flag = 1
+        elif Y_B_in_last >= self.max_inlet_ele: # check for channel infill
+            exit_flag = 2
+        else: # check for steady state
+
+            n_t_steps = int(self.t_steady / self.t_step)
+
+            if len(Y_B_in_full) >= 2*n_t_steps: # check if enough time passed
+                Y_B_in_last_avg = np.mean(Y_B_in_full[-(2*n_t_steps):-n_t_steps])
+                Y_B_in_this_avg = np.mean(Y_B_in_full[-n_t_steps:])
+                Y_B_in_diff = np.abs(Y_B_in_this_avg-Y_B_in_last_avg)
+                #Y_B_in_diff_ratio = Y_B_in_diff/Y_B_in_last_avg
+                if Y_B_in_diff<=self.h_tol: # check if holding within tolerance
+                    exit_flag = 3
+                else:
+                    exit_flag = 0
+            else:
+                exit_flag = 0
+        return exit_flag
+
+class RunToEnd:
+    def __init__(self):
+        self.idk = 1 
+
+    def test(self,chan:TrapezoidChannel, morph_results:MorphoResults):
+        exit_flag = 0
+        return exit_flag
+
+run_to_end = RunToEnd()
+
+def RunCutoffSimulation(chan,Y_BR1,Y_BR2,BF,trans,H_of_t,t_step,t_stop,plot_inc=None,exit_method=run_to_end):
     '''
     Code to run a morpodynamic simulation of some period of flow using a chan and trans input
 
@@ -1076,11 +1149,11 @@ def RunCutoffSimulation(chan,Y_BR1,Y_BR2,BF,trans,H_of_t,t_step,t_stop,plot_inc=
         fig, ax1 = PlotHydraulics(chan,y,Q,plot_normal=False)
         fig, ax2 = PlotSediment(chan,trans,y,Q,sed_results)
 
-    # FIXME should probably go to adaptive time stepping based on bed change rate
     t_steps = np.arange(0,t_stop+.0001,t_step)
 
     morph_results = MorphoResults(t_steps)
 
+    exit_flag = 0
     ii = 0
     jj = 0
     for t in t_steps:
@@ -1114,16 +1187,13 @@ def RunCutoffSimulation(chan,Y_BR1,Y_BR2,BF,trans,H_of_t,t_step,t_stop,plot_inc=
                 PlotSediment(chan,trans,y,Q,sed_results,ax=ax2,color=colors[jj],label=label_jj)
                 jj+=1
 
-
-        # FIXME add depth criterion to say channel is plugged, exit.
-
-        if not exit_func(chan):
+        exit_flag = exit_method.test(chan,morph_results)
+        if exit_flag != 0:
             break
 
         ii+=1
 
-
-    return chan, morph_results
+    return chan, morph_results, exit_flag
 
 
 # end region
@@ -1279,7 +1349,7 @@ def PlotSediment(chan,trans,y,Q,SedimentResults,ax=None,color='k',label=None):
 
 def PlotChuteSim(morph_results:MorphoResults):
 
-    fig, ax = plt.subplots(2,2,figsize=(12,9),layout='constrained')
+    fig, ax = plt.subplots(2,2,figsize=(8,6),layout='constrained')
     ax[0,0].plot(morph_results.t_steps/(60*60),morph_results.Y_B_in)
     ax[0,0].plot(morph_results.t_steps/(60*60),morph_results.Y_B_out)
     ax[0,0].set_xlabel('time (hr)')
@@ -1297,8 +1367,11 @@ def PlotChuteSim(morph_results:MorphoResults):
     ax[1,0].set_ylabel('c_in (m^3/m^3)')
     ax[1,0].set_title('Inlet sediment concentration')
 
+    horz_line = np.zeros_like(morph_results.t_steps)
+    horz_line[np.isnan(morph_results.c_in_of_t)] = np.nan
     ax[1,1].plot(morph_results.t_steps/(60*60),morph_results.eta_dot_in)
     ax[1,1].plot(morph_results.t_steps/(60*60),morph_results.eta_dot_out)
+    ax[1,1].plot(morph_results.t_steps/(60*60),horz_line,'k--')
     ax[1,1].set_xlabel('time (hr)')
     ax[1,1].set_ylabel('eta (m/s)')
     ax[1,1].set_title('Inlet and outlet bed change rate')
