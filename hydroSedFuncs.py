@@ -1069,6 +1069,9 @@ class ChuteSimExit(ABC):
         pass
 
 class ExitOnSteadyOrFill:
+    '''
+    Checks for chute inlet filling, eroding to some depth, or reaching a steady state
+    '''
     def __init__(self,min_inlet_ele:float,max_inlet_ele:float,t_step:float,t_steady:float,h_tol:float=.001):
         self.min_inlet_ele = min_inlet_ele 
         self.max_inlet_ele = max_inlet_ele 
@@ -1102,6 +1105,45 @@ class ExitOnSteadyOrFill:
                 exit_flag = 0
         return exit_flag
 
+
+class ExitOnSteadyOrFill2:
+    '''
+    Same as above but checks the chute cutoff outlet rather than the inlet
+    '''
+    def __init__(self,min_outlet_ele:float,max_outlet_ele:float,t_step:float,t_steady:float,h_tol:float=.001):
+        self.min_outlet_ele = min_outlet_ele 
+        self.max_outlet_ele = max_outlet_ele 
+        self.t_steady = t_steady 
+        self.t_step = t_step
+        self.h_tol = h_tol
+
+    def test(self,chan:TrapezoidChannel, morph_results:MorphoResults):
+        Y_B_out = morph_results.Y_B_out
+        Y_B_out_full = Y_B_out[np.invert(np.isnan(Y_B_out))]
+        Y_B_out_last = Y_B_out_full[-1]
+        #print(Y_B_out_last)
+        if Y_B_out_last <= self.min_outlet_ele: # check for erosion to river level
+            exit_flag = 1
+        elif Y_B_out_last >= self.max_outlet_ele: # check for channel infill
+            exit_flag = 2
+        else: # check for steady state
+
+            n_t_steps = int(self.t_steady / self.t_step)
+
+            if len(Y_B_out_full) >= 2*n_t_steps: # check if enough time passed
+                Y_B_out_last_avg = np.mean(Y_B_out_full[-(2*n_t_steps):-n_t_steps])
+                Y_B_out_this_avg = np.mean(Y_B_out_full[-n_t_steps:])
+                Y_B_out_diff = np.abs(Y_B_out_this_avg-Y_B_out_last_avg)
+                #Y_B_out_diff_ratio = Y_B_out_diff/Y_B_out_last_avg
+                if Y_B_out_diff<=self.h_tol: # check if holding within tolerance
+                    exit_flag = 3
+                else:
+                    exit_flag = 0
+            else:
+                exit_flag = 0
+        return exit_flag
+
+
 class RunToEnd:
     def __init__(self):
         self.idk = 1 
@@ -1112,7 +1154,7 @@ class RunToEnd:
 
 run_to_end = RunToEnd()
 
-def RunCutoffSimulation(chan,Y_BR1,Y_BR2,BF,trans,H_of_t,t_step,t_stop,plot_inc=None,exit_method=run_to_end):
+def RunCutoffSimulation(chan,Y_BR1,Y_BR2,BF,trans,H_of_t,t_step,t_stop,c_in_override=None,plot_inc=None,exit_method=run_to_end):
     '''
     Code to run a morpodynamic simulation of some period of flow using a chan and trans input
 
@@ -1161,7 +1203,10 @@ def RunCutoffSimulation(chan,Y_BR1,Y_BR2,BF,trans,H_of_t,t_step,t_stop,plot_inc=
         norm_flow = trans.normalFlowWide(H,BF.S)
 
         z_over = np.linspace(chan.Y_B[0]-Y_BR1,H,500)
-        c_over_avg = AverageConcentration(z_over,norm_flow['c_b'],norm_flow['P'],H,trans.a_ref)
+        if c_in_override is None:
+            c_over_avg = AverageConcentration(z_over,norm_flow['c_b'],norm_flow['P'],H,trans.a_ref)
+        else: 
+            c_over_avg = c_in_override
 
         y_in = (Y_BR1+H)-chan.Y_B[0] 
         y_out = (Y_BR2+H)-chan.Y_B[-1]
