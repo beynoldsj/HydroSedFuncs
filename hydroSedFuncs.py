@@ -922,8 +922,13 @@ def ReservoirProblemSubcritical(chan,y_res_in,y_out,V_res=0.,transport=None,Q_gu
         #print(np.shape(y_res_g))
         #print(np.shape(y_res_in))
         return y_res_g - y_res_in 
+        #return np.abs(y_res_g - y_res_in)
     
     Q_match = fsolve(func, Q_guess, )[0] 
+    #print(Q_guess)
+    #solve_out = minimize(func, Q_guess, method='nelder-mead', options={'xatol': 1e-8})
+    #Q_match = solve_out.x[0]
+    #print(Q_match)
 
     return Q_match
 
@@ -1071,6 +1076,18 @@ class ChuteSimExit(ABC):
 class ExitOnSteadyOrFill:
     '''
     Checks for chute inlet filling, eroding to some depth, or reaching a steady state
+    
+    min_inlet_ele: minimum inlet elevation in absolute coordinates (same as in channel)
+    max_inlet_ele: maximum inlet elevation in absolute coordineates
+    t_step: the simulation time step
+    t_steady: the amount of time for averaging to compare steady state
+    h_tol: the height tolerance that the second time aver
+    
+    Flags:
+        0: no exit condition met
+        1: eroded to lowest level allowed
+        2: infilled to highest level allowed
+        3: reached steady state
     '''
     def __init__(self,min_inlet_ele:float,max_inlet_ele:float,t_step:float,t_steady:float,h_tol:float=.001):
         self.min_inlet_ele = min_inlet_ele 
