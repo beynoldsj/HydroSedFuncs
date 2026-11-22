@@ -8,8 +8,15 @@ import numpy as np
 from scipy.integrate import solve_ivp
 from scipy.optimize import fsolve
 from scipy.optimize import minimize
-from scipy.optimize import Bounds
-from scipy.optimize import minimize_scalar
+#from scipy.optimize import Bounds
+#from scipy.optimize import minimize_scalar
+
+# 1-D root finding functions
+from scipy.optimize import brentq 
+#from scipy.optimize import brenth 
+#from scipy.optimize import ridder
+#from scipy.optimize import secant
+
 from scipy.interpolate import RegularGridInterpolator
 
 import matplotlib.pyplot as plt
@@ -18,6 +25,7 @@ import cmcrameri as cmc
 from abc import ABC, abstractmethod
 import copy
 
+from numericalMethodsFuncs import *
 
 # -------------------------------------------------------------------------------------------------
 # region BASIC HYDRAULIC FUNCTIONS
@@ -92,8 +100,13 @@ def ReynoldsParticle(D,nu,rho_w=1000.0,rho_s=2650.0,g=9.81):
 def TermVelMadsen(D_S,A=0.954,B=5.12,D_S_to_D_N=0.9,nu=1.e-6,rho_w=1000.,rho_s=2650.,g=9.81):
     '''MADSEN (2006) empirical settling velocity with constants for worn quartz sand as default input
     as in ASCE 110 
-
+    NOTE: this equation is only for sand sizes (.063 to 2 mm)
     '''
+
+    D_min = np.min(D_S)
+    D_max = np.max(D_S)
+    if (D_min<63e-6) or (D_max>2e-3):
+        raise Exception('TermVelMadsen: this equation is only for sand sizes (.063 to 2 mm)')
 
     R = rho_s/rho_w-1.0 
     D_N = D_S / D_S_to_D_N
@@ -101,7 +114,30 @@ def TermVelMadsen(D_S,A=0.954,B=5.12,D_S_to_D_N=0.9,nu=1.e-6,rho_w=1000.,rho_s=2
     S_star = D_N/(4.*nu) * np.sqrt(g*R*D_N) 
     v_s = np.sqrt(g*R*D_N)*(A+B/S_star)**-1.
 
+    return v_s 
+
+def TermVelDietrich(D_S,nu=1.e-6,rho_w=1000.,rho_s=2650.,g=9.81):
+    '''Dietrich (1982) empirical settling velocity that works across a larger range of sizes (up to Re_p=2.5e6),
+    but is maybe worse for sands than Madsen above?
+    '''
+
+    b1 = 2.891394
+    b2 = 0.95296
+    b3 = 0.056835
+    b4 = 0.002892 
+    b5 = 0.000245 
+
+    R = (rho_s-rho_w)/rho_w
+    Re_p = (np.sqrt(g*R*D_S)*D_S)/nu
+    Re_p_max = np.max(Re_p) 
+    if Re_p_max>2.5e6:
+        raise Exception('TermVelDietrich: formula Only valid for Re_p<2.5e6')
+
+    R_f = np.exp(-b1 + b2*np.log(Re_p) - b3*np.log(Re_p)**2 - b4*np.log(Re_p)**3 + b5 *np.log(Re_p)**4) 
+    v_s = R_f*np.sqrt(g*R*D_S) 
+
     return v_s
+
 
 def RouseFits(P,ref_depth):
     '''Provides the J1 and J2 values for Rouse profiles integrals (Ref ASCE110 Equation 2-221)
@@ -337,7 +373,7 @@ def Cz_skin_drag_Wright_Parker(D50,H_range=[.1,10.1,.1],V_range=[.1,4.01,.01],
         cbar.set_label(r'$u^*_s$')
         ax[2,2].set_title('Shear velocity skin component')
 
-        plt.show()
+        #plt.show()
 
     return H_mesh, V_mesh, Cz_plot, tau_star_s_plot
 
@@ -418,7 +454,7 @@ class WrightParkerPlusDeLeeuw:
     '''
 
     def __init__(self,D50,D_to_ks=3.0,rho_w=1000.,rho_s=2650.,lamb=0.3,g=9.81,T=20.,
-                 y_range=[.1,10.1,.1],V_range=[.1,4.01,.01],tau_star_min=.08):
+                 y_range=[.1,10.1,.1],V_range=[.1,4.01,.01],tau_star_min=.08,make_plots=False):
         self.D50 = D50 
         self.rho_w = rho_w 
         self.rho_s = rho_s
@@ -435,7 +471,8 @@ class WrightParkerPlusDeLeeuw:
 
         # generate lookup table for Cz and for tau_star_s as a function of flow depth and velocity 
         self.y_mesh, self.V_mesh, self.Cz_mesh, self.tau_star_sk_mesh = Cz_skin_drag_Wright_Parker(
-            D50,y_range,V_range,D_to_ks=D_to_ks,alpha_r=8.32,R=self.R,g=g,tau_star_s_min=tau_star_min
+            D50,y_range,V_range,D_to_ks=D_to_ks,alpha_r=8.32,R=self.R,g=g,tau_star_s_min=tau_star_min,
+            make_plots=make_plots
         )
         
     
@@ -604,7 +641,7 @@ class WrightParkerPlusDeLeeuw:
             tau_b_sk = self.rho_w*self.g*y_sk*S
             tau_star_sk = tau_b_sk / (self.rho_w*self.R*self.g*self.D50)
 
-            Cz_sk = ManningStrickler(y_sk,self.D50,3) # FIXME - FIXED to be the height corresponding to skin drag
+            Cz_sk = ManningStrickler(y_sk,self.D50,3)
             u_star_sk = np.sqrt(tau_b_sk/self.rho_w)
             U = Cz_sk*u_star_sk
             Fr = U / np.sqrt(self.g*y) # calculate the Froude number as if this iteration is turning out to give the correct flow depth
@@ -740,11 +777,14 @@ class TrapezoidChannel:
         '''Normal depth
         
         '''
-        RHS_func = self.n[ii]*Q / (self.Kn * self.S[ii]**0.5 * self.b[ii]**(8/3))
-        def func(yp):
-            return (yp*(1+self.m[ii]*yp))**(5/3) / (1+2*yp*(1+self.m[ii]**2.)**0.5)**(2/3) - RHS_func
-        yp_solved = fsolve(func, 0.5)[0] 
-        y0 = yp_solved*self.b[ii]
+        if self.S[ii] > 0: 
+            RHS_func = self.n[ii]*Q / (self.Kn * self.S[ii]**0.5 * self.b[ii]**(8/3))
+            def func(yp):
+                return (yp*(1+self.m[ii]*yp))**(5/3) / (1+2*yp*(1+self.m[ii]**2.)**0.5)**(2/3) - RHS_func
+            yp_solved = fsolve(func, 0.5)[0] 
+            y0 = yp_solved*self.b[ii]
+        else:
+            y0 = 0.
         return y0 
     
     def y_c_prof(self,Q,alpha=1.):
@@ -786,6 +826,138 @@ class TrapezoidChannel:
             ax[2].plot(self.x,self.S)
         return fig, ax
 
+
+class RectangularChannel:
+    '''Make a class that stores the channel geometry and returns cross section information at requested locations. 
+    Idea is that it stores only the geometry itself and calculations based on that geometry. Does not store the water
+    levels but provides normal and critical depths, Fr, etc as function of given flows.
+    Stores the following variables
+        x: x points (must start at zero)
+        Y_B: base of channel in some fixed coordinate system 
+        b: width of rectangle. Can be given as array length as x or single value. 
+        n: mannings n. Can be given as array length as x or single value.  
+        g: grav accel. 
+        Kn: modifier for mannnings n. Only used if using SI units for some reason.
+        nx: number of x points 
+        S: slope (as positive) calculated with central differences from x
+    '''
+
+    def __init__(self,x,Y_B,b,n,g=9.81,Kn=1.0):
+        self.x = x 
+        self.Y_B = Y_B.copy()
+        
+        if np.size(np.array(b)) == 1:
+            self.b = b * np.ones_like(x)
+        else:
+            self.b = b
+
+        if np.size(np.array(n)) == 1:
+            self.n = n * np.ones_like(x)
+        else:
+            self.n = n
+
+        self.g = g
+        self.Kn = Kn
+
+        self.nx = np.size(x)
+        self.S = -np.gradient(self.Y_B,self.x)
+        #self.S_reverse = np.flip(self.S) 
+
+    def update_bed(self,dY):
+        '''Apply a geometry increment to the bed
+        
+        '''
+        self.Y_B+=dY
+        self.S = -np.gradient(self.Y_B,self.x)
+
+    def A(self,y,ii):
+        '''Area
+        
+        '''
+        return y*self.b[ii]
+    
+    def y_of_A(self,A,ii): 
+        '''Depth from area
+        
+        '''
+        return A / self.b[ii]
+    
+    def P(self,y,ii):
+        '''Perimeter
+        
+        '''
+        return 2*y + self.b[ii]
+    
+    def R(self,y,ii):
+        '''Hydraulic radius
+        
+        '''
+        return self.A(y,ii) / self.P(y,ii)
+    
+    def Fr(self,y,V,ii,alpha=1.):
+        '''Froude number
+        
+        '''        
+        return V / ( (self.g*y)**0.5 )
+    
+    def y_c(self,Q,ii,alpha=1.):
+        '''Critical depth at point'''
+        q = Q/self.b[ii]
+        yc = ((q**2)/self.g)**(1/3)
+        return yc
+    
+    def y_0(self,Q,ii):
+        '''Normal depth
+        
+        '''
+        if self.S[ii] > 0: 
+            RHS_func = (self.n[ii]*Q) / (self.Kn * self.S[ii]**0.5)
+            def func(yp):
+                return RHS_func - ( self.A(yp,ii) * self.R(yp,ii)**(2/3) )
+            yp_solved = fsolve(func, 0.5)[0] 
+            y0 = yp_solved*self.b[ii]
+        else:
+            y0 = 0.
+        return y0 
+    
+    def y_c_prof(self,Q,alpha=1.):
+        '''Calculate critical depth for entire profile
+        
+        '''
+        y_c_of_x = np.zeros_like(self.x)
+        for aa in np.arange(0,self.nx):
+            y_c_of_x[aa] = self.y_c(Q,aa,alpha=alpha)
+        return y_c_of_x
+    
+    def y_0_prof(self,Q):
+        '''Calculate normal depth for entire profile
+        
+        '''
+        y_0_of_x = np.zeros_like(self.x)
+        for aa in np.arange(0,self.nx):
+            y_0_of_x[aa] = self.y_0(Q,aa)
+        return y_0_of_x
+    
+    def plot_geometry(self,fig=None,ax=None):
+        if ax is None:
+            fig, ax = plt.subplots(3,1,figsize=(8,6),layout='constrained')
+            ax[0].plot(self.x,self.Y_B)
+            ax[0].set_xlabel('x (m)')
+            ax[0].set_ylabel('Y_B (m)')
+            ax[0].set_title('Channel bed elevation')
+            ax[1].plot(self.x,self.b)
+            ax[1].set_xlabel('x (m)')
+            ax[1].set_ylabel('B (m)')
+            ax[1].set_title('Channel width')
+            ax[2].plot(self.x,self.S)
+            ax[2].set_xlabel('x (m)')
+            ax[2].set_ylabel('S (m/m)')
+            ax[2].set_title('Channel slope')
+        else:
+            ax[0].plot(self.x,self.Y_B)
+            ax[1].plot(self.x,self.Y_B)
+            ax[2].plot(self.x,self.S)
+        return fig, ax
 
 # endregion
 
@@ -883,7 +1055,7 @@ def ReservoirHeight(y_in,Q,A_in,V_res=0.0,g=9.81):
     return y_res
 
 
-def ReservoirProblemSubcritical(chan,y_res_in,y_out,V_res=0.,transport=None,Q_guess=None):
+def ReservoirProblemSubcritical(chan,y_res_in,y_out,V_res=0.,transport=None,Q_guess=None,spline_solve=False):
     '''Solve gradually varied flow between two reservoirs. If the slope is constant for long enough exiting the 
     upper reservoir, normal flow will occur and it's possible to solve for the normal flow that respects the energy 
     equation for the reservoir height turning into height and velocity. For arbitrary channel geometries, however, 
@@ -901,16 +1073,24 @@ def ReservoirProblemSubcritical(chan,y_res_in,y_out,V_res=0.,transport=None,Q_gu
     '''
 
     # make an initial guess assuming at normal flow
-    nx_avg_to = int(chan.x[-1]/4)
+    #print(nx_avg_to)
+    nx_avg_to = int(len(chan.x)/2) # NOTE with 1/4 sometimes an adverse slope forms at the starts, makes problems!
     avg_inds = np.arange(0,nx_avg_to)
     S_in_avg = np.mean(chan.S[0:nx_avg_to]) # use the average slope of the first 1/4 of the channel
-    n_in_avg = np.mean(chan.n[avg_inds])
+    n_in_avg = np.mean(chan.n[0:nx_avg_to])
     y_in_guess = 0.9*y_res_in # assume that y_in at will be close to y_res_in because subcritical 
     A_in_guess = np.mean(chan.A(y_in_guess,avg_inds))
     R_in_guess = np.mean(chan.R(y_in_guess,avg_inds))
     
     if Q_guess is None:
         Q_guess = (chan.Kn/n_in_avg) * A_in_guess * R_in_guess**(2/3) * S_in_avg**0.5 
+        # print(chan.Kn)
+        # print(n_in_avg)
+        # print(A_in_guess)
+        # print(R_in_guess)
+        # print(S_in_avg)
+        # print(Q_guess)
+        # FIXME handle a negative slope coming in here.
     #print(Q_guess,n_in_avg,chan.Kn,A_in_guess,R_in_guess,S_in_avg)
 
     def func(Q_g):
@@ -924,7 +1104,16 @@ def ReservoirProblemSubcritical(chan,y_res_in,y_out,V_res=0.,transport=None,Q_gu
         return y_res_g - y_res_in 
         #return np.abs(y_res_g - y_res_in)
     
-    Q_match = fsolve(func, Q_guess, )[0] 
+    if not spline_solve:
+        Q_match = fsolve(func, Q_guess, )[0] 
+    else:
+        try:
+            Q_match = brentq(func,Q_guess*.9,Q_guess*1.1)
+        except:
+            print('brentq failed')
+            Q_match = fsolve(func, Q_guess, )[0] 
+            
+
     #print(Q_guess)
     #solve_out = minimize(func, Q_guess, method='nelder-mead', options={'xatol': 1e-8})
     #Q_match = solve_out.x[0]
@@ -1073,7 +1262,7 @@ class ChuteSimExit(ABC):
         '''Return exit flag where 0 means continue sim'''
         pass
 
-class ExitOnSteadyOrFill:
+class ExitOnSteadyOrFillInlet:
     '''
     Checks for chute inlet filling, eroding to some depth, or reaching a steady state
     
@@ -1123,7 +1312,7 @@ class ExitOnSteadyOrFill:
         return exit_flag
 
 
-class ExitOnSteadyOrFill2:
+class ExitOnSteadyOrFillOutlet:
     '''
     Same as above but checks the chute cutoff outlet rather than the inlet
     '''
@@ -1161,6 +1350,69 @@ class ExitOnSteadyOrFill2:
         return exit_flag
 
 
+class ExitOnSteadyOrFillInAndOut:
+    '''
+    Checks for chute inlet filling, eroding to some depth, or reaching a steady state
+    
+    min_inlet_ele: minimum inlet elevation in absolute coordinates (same as in channel)
+    max_inlet_ele: maximum inlet elevation in absolute coordineates
+    t_step: the simulation time step
+    t_steady: the amount of time for averaging to compare steady state
+    h_tol: the height tolerance that the second time aver
+    
+    Flags:
+        0: no exit condition met
+        1: eroded to lowest level allowed
+        2: infilled to highest level allowed
+        3: reached steady state
+    '''
+    def __init__(self,min_inlet_ele:float,max_inlet_ele:float,min_outlet_ele:float,
+                 max_outlet_ele:float,t_step:float,t_steady:float,h_tol:float=.001):
+        self.min_inlet_ele = min_inlet_ele 
+        self.max_inlet_ele = max_inlet_ele 
+        self.min_outlet_ele = min_outlet_ele 
+        self.max_outlet_ele = max_outlet_ele
+        self.t_steady = t_steady 
+        self.t_step = t_step
+        self.h_tol = h_tol
+
+    def test(self,chan:TrapezoidChannel, morph_results:MorphoResults):
+        Y_B_in = morph_results.Y_B_in
+        Y_B_in_full = Y_B_in[np.invert(np.isnan(Y_B_in))]
+        Y_B_in_last = Y_B_in_full[-1]
+        Y_B_out = morph_results.Y_B_out
+        Y_B_out_full = Y_B_out[np.invert(np.isnan(Y_B_out))]
+        Y_B_out_last = Y_B_out_full[-1]
+        #print(Y_B_in_last)
+        if Y_B_in_last <= self.min_inlet_ele: # check for erosion to river level
+            exit_flag = 1
+        elif Y_B_in_last >= self.max_inlet_ele: # check for channel infill
+            exit_flag = 2
+        if Y_B_out_last <= self.min_outlet_ele: # check for erosion to river level
+            exit_flag = 4
+        elif Y_B_out_last >= self.max_outlet_ele: # check for channel infill
+            exit_flag = 5
+        else: # check for steady state
+
+            n_t_steps = int(self.t_steady / self.t_step)
+
+            if len(Y_B_in_full) >= 2*n_t_steps: # check if enough time passed
+                Y_B_in_last_avg = np.mean(Y_B_in_full[-(2*n_t_steps):-n_t_steps])
+                Y_B_in_this_avg = np.mean(Y_B_in_full[-n_t_steps:])
+                Y_B_in_diff = np.abs(Y_B_in_this_avg-Y_B_in_last_avg)
+                Y_B_out_last_avg = np.mean(Y_B_out_full[-(2*n_t_steps):-n_t_steps])
+                Y_B_out_this_avg = np.mean(Y_B_out_full[-n_t_steps:])
+                Y_B_out_diff = np.abs(Y_B_out_this_avg-Y_B_out_last_avg)
+                #Y_B_in_diff_ratio = Y_B_in_diff/Y_B_in_last_avg
+                if (Y_B_in_diff<=self.h_tol) and (Y_B_out_diff<=self.h_tol): # check if holding within tolerance
+                    exit_flag = 3
+                else:
+                    exit_flag = 0
+            else:
+                exit_flag = 0
+        return exit_flag
+
+
 class RunToEnd:
     def __init__(self):
         self.idk = 1 
@@ -1171,7 +1423,7 @@ class RunToEnd:
 
 run_to_end = RunToEnd()
 
-def RunCutoffSimulation(chan,Y_BR1,Y_BR2,BF,trans,H_of_t,t_step,t_stop,c_in_override=None,plot_inc=None,exit_method=run_to_end):
+def RunCutoffSimulation(chan,Y_BR1,Y_BR2,BF,trans,H_of_t,t_step,t_stop,Q_guess_init=None,c_in_override=None,plot_inc=None,exit_method=run_to_end):
     '''
     Code to run a morpodynamic simulation of some period of flow using a chan and trans input
 
@@ -1199,8 +1451,11 @@ def RunCutoffSimulation(chan,Y_BR1,Y_BR2,BF,trans,H_of_t,t_step,t_stop,c_in_over
 
     y_in = (Y_BR1+H_of_t(0))-chan.Y_B[0] 
     y_out = (Y_BR2+H_of_t(0))-chan.Y_B[-1]
-    Q = ReservoirProblemSubcritical(chan,y_in,y_out,transport=trans) # NOTE this is not just for plotting, 
-                                                                    # provices the first Q guess
+    if Q_guess_init is None:
+        Q = ReservoirProblemSubcritical(chan,y_in,y_out,transport=trans)
+    else:
+        Q = Q_guess_init
+
     y = SubcriticalGVF(chan,Q,y_out,transport=trans)
     sed_results = QuasiSteadyTransport(chan, trans, y, Q, c_over_avg)
 
@@ -1228,7 +1483,7 @@ def RunCutoffSimulation(chan,Y_BR1,Y_BR2,BF,trans,H_of_t,t_step,t_stop,c_in_over
         y_in = (Y_BR1+H)-chan.Y_B[0] 
         y_out = (Y_BR2+H)-chan.Y_B[-1]
 
-        Q = ReservoirProblemSubcritical(chan,y_in,y_out,transport=trans,Q_guess=Q)
+        Q = ReservoirProblemSubcritical(chan,y_in,y_out,transport=trans,Q_guess=Q,spline_solve=True)
         y = SubcriticalGVF(chan,Q,y_out,transport=trans)
         sed_results = QuasiSteadyTransport(chan, trans, y, Q, c_over_avg)
 
@@ -1277,10 +1532,12 @@ def PlotHydraulics(chan,y,Q,plot_critical=True,plot_normal=True,ax=None,color=No
 
     # calc profiles in absolute coordinates
     Y = chan.Y_B + y  # water surface 
-    y_c = chan.y_c_prof(Q) # critical depth
-    Y_c = chan.Y_B + y_c # critcal depth surface
-    y_0 = chan.y_0_prof(Q) # normal depth 
-    Y_0 = chan.Y_B + y_0 # normal depth surface
+    if plot_critical:
+        y_c = chan.y_c_prof(Q) # critical depth
+        Y_c = chan.Y_B + y_c # critcal depth surface
+    if plot_normal:
+        y_0 = chan.y_0_prof(Q) # normal depth 
+        Y_0 = chan.Y_B + y_0 # normal depth surface
 
     A_of_x = chan.A(y,np.arange(0,chan.nx)) 
     V_of_x = Q / A_of_x 
